@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    # all crates in a `./crates` folder will be added to the workspace
+    "crates/*",
+]
+
+[workspace.dependencies]
+# these are very likely to be used across all/most crates so pin the version for them all
+miette = "7.2.0"
+serde = { version = "1.0.202", features = ["derive"] }
+thiserror = "1.0.60"
