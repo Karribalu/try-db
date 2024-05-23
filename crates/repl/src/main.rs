@@ -1,4 +1,6 @@
 use std::io;
+use scan_fmt::scan_fmt;
+
 enum MetaCommandResult{
     MetaCommandSuccess,
     MetaCommandUnrecognizedCommand,
@@ -11,16 +13,29 @@ enum StatementType{
 }
 enum PrepareResult{
     PrepareSuccess,
-    PrepareUnrecognizedStatement
+    PrepareUnrecognizedStatement,
+    PrepareSyntaxError
+}
+#[derive(Debug)]
+struct Row{
+    id: i32,
+    username: String,
+    email: String
 }
 #[derive(Debug)]
 struct Statement {
-    statement_type: Option<StatementType>
+    statement_type: Option<StatementType>,
+    row_to_insert: Row
 }
 impl Statement{
     fn new() -> Statement {
         Statement{
-            statement_type: None
+            statement_type: None,
+            row_to_insert: Row {
+                id: 0,
+                username: String::new(),
+                email: String::new(),
+            },
         }
     }
 }
@@ -53,11 +68,12 @@ fn main() {
         let mut statement = Statement::new();
         match prepare_statement(&input_buffer, &mut statement) {
             PrepareResult::PrepareSuccess => {
-                println!("Prepare success {:?}", statement.statement_type);
+                println!("Prepare success {:?}", statement);
             },
             PrepareResult::PrepareUnrecognizedStatement => {
                 println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
             }
+            _ => {}
         }
         execute_statement(&mut statement);
     }
@@ -93,7 +109,17 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
         return match &buffer_data[..6] {
             "insert" => {
                 statement.statement_type = Some(StatementType::StatementInsert);
-                PrepareResult::PrepareSuccess
+                match scan_fmt!(buffer_data, "insert {} {} {}", i32, String, String) {
+                    Ok((id, name, email)) => {
+                        statement.row_to_insert.id = id;
+                        statement.row_to_insert.email = email;
+                        statement.row_to_insert.username = name;
+                        PrepareResult::PrepareSuccess
+                    }
+                    Err(_) => {
+                        PrepareResult::PrepareSyntaxError
+                    }
+                }
             },
             "select" => {
                 statement.statement_type = Some(StatementType::StatementSelect);
