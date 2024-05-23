@@ -1,4 +1,7 @@
-use std::io;
+use std::borrow::ToOwned;
+use std::clone::Clone;
+use std::{io, ptr};
+use std::mem::size_of;
 use scan_fmt::scan_fmt;
 
 enum MetaCommandResult{
@@ -22,23 +25,54 @@ struct Row{
     username: String,
     email: String
 }
+impl Row{
+    fn new() -> Self{
+        Row {
+            id: 0,
+            username: String::with_capacity(32),
+            email: String::with_capacity(255),
+        }
+    }
+}
 #[derive(Debug)]
 struct Statement {
     statement_type: Option<StatementType>,
     row_to_insert: Row
 }
+
 impl Statement{
     fn new() -> Statement {
         Statement{
             statement_type: None,
             row_to_insert: Row {
                 id: 0,
-                username: String::new(),
-                email: String::new(),
+                username: String::with_capacity(32),
+                email: String::with_capacity(255),
             },
         }
     }
 }
+
+const ID_SIZE: usize = size_of::<i32>();
+const USERNAME_SIZE: usize = 32;
+const EMAIL_SIZE: usize = 255;
+const ID_OFFSET: usize = 0;
+const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
+const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
+const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+/*
++void serialize_row(Row* source, void* destination) {
++  memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
++  memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE);
++  memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);
++}
++
++void deserialize_row(void* source, Row* destination) {
++  memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
++  memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
++  memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
++}
+ */
 #[derive(Debug)]
 struct InputBuffer {
     buffer: Option<String>,
@@ -69,6 +103,17 @@ fn main() {
         match prepare_statement(&input_buffer, &mut statement) {
             PrepareResult::PrepareSuccess => {
                 println!("Prepare success {:?}", statement);
+                let mut buffer: Vec<u8> = vec![0; ID_SIZE + USERNAME_SIZE + EMAIL_SIZE];
+
+                serialize_row(&statement.row_to_insert, &mut buffer);
+                println!("serialization {:?}", buffer);
+                let mut destination_row = Row::new();
+
+                deserialize_row(&buffer, &mut destination_row);
+                println!("deserialization {:?}", destination_row);
+                assert_eq!(statement.row_to_insert.id, destination_row.id);
+                assert_eq!(&statement.row_to_insert.username, &destination_row.username);
+                assert_eq!(&statement.row_to_insert.email, &destination_row.email);
             },
             PrepareResult::PrepareUnrecognizedStatement => {
                 println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
@@ -146,5 +191,47 @@ fn execute_statement(statement: &mut Statement){
                 }
             }
         }
+    }
+}
+
+fn serialize_row(source: &Row, destination: &mut [u8]){
+    unsafe {
+        ptr::copy_nonoverlapping(
+            &source.id as *const i32 as *const u8,
+            destination.as_mut_ptr().add(ID_OFFSET),
+            ID_SIZE
+        );
+        let username_bytes = source.username.as_bytes();
+        ptr::copy_nonoverlapping(
+            username_bytes.as_ptr(),
+            destination.as_mut_ptr().add(USERNAME_OFFSET),
+            USERNAME_SIZE
+        );
+        let email_bytes = source.email.as_bytes();
+        let email_length = email_bytes.len().min(EMAIL_SIZE);
+        ptr::copy_nonoverlapping(
+            email_bytes.as_ptr(),
+            destination.as_mut_ptr().add(EMAIL_OFFSET),
+            email_length
+        );
+        if email_length < EMAIL_SIZE {
+            ptr::write_bytes(destination.as_mut_ptr().add(EMAIL_OFFSET + email_length), 0, EMAIL_SIZE - email_length);
+        }
+    }
+}
+fn deserialize_row(source: &[u8], destination: &mut Row) {
+    unsafe {
+        ptr::copy_nonoverlapping(
+            source.as_ptr().add(ID_OFFSET),
+            &mut destination.id as *mut i32 as *mut u8,
+            ID_SIZE,
+        );
+
+        let username_bytes = &source[USERNAME_OFFSET..USERNAME_OFFSET + USERNAME_SIZE];
+        destination.username = String::from_utf8_lossy(username_bytes).trim_end_matches('\0').to_string();
+
+        // Copy Email
+        let email_bytes = &source[EMAIL_OFFSET..EMAIL_OFFSET + EMAIL_SIZE];
+        destination.email = String::from_utf8_lossy(email_bytes).trim_end_matches('\0').to_string();
     }
 }
