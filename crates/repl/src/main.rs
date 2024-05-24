@@ -1,8 +1,23 @@
+use std::{io, ptr};
 use std::borrow::ToOwned;
 use std::clone::Clone;
-use std::{io, ptr};
 use std::mem::size_of;
+
 use scan_fmt::scan_fmt;
+use crate::ExecuteResult::ExecuteSuccess;
+
+const ID_SIZE: usize = size_of::<i32>();
+const USERNAME_SIZE: usize = 32;
+const EMAIL_SIZE: usize = 255;
+const ID_OFFSET: usize = 0;
+const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
+const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
+const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
+
+const PAGE_SIZE: usize = 4096;
+const TABLE_MAX_PAGES: usize = 100;
+const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
+const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
 enum MetaCommandResult{
     MetaCommandSuccess,
@@ -18,6 +33,12 @@ enum PrepareResult{
     PrepareSuccess,
     PrepareUnrecognizedStatement,
     PrepareSyntaxError
+}
+
+enum ExecuteResult{
+    ExecuteSuccess,
+    ExecuteTableFull,
+    ExecuteFail
 }
 #[derive(Debug)]
 struct Row{
@@ -53,26 +74,7 @@ impl Statement{
     }
 }
 
-const ID_SIZE: usize = size_of::<i32>();
-const USERNAME_SIZE: usize = 32;
-const EMAIL_SIZE: usize = 255;
-const ID_OFFSET: usize = 0;
-const USERNAME_OFFSET: usize = ID_OFFSET + ID_SIZE;
-const EMAIL_OFFSET: usize = USERNAME_OFFSET + USERNAME_SIZE;
-const ROW_SIZE: usize = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-/*
-+void serialize_row(Row* source, void* destination) {
-+  memcpy(destination + ID_OFFSET, &(source->id), ID_SIZE);
-+  memcpy(destination + USERNAME_OFFSET, &(source->username), USERNAME_SIZE);
-+  memcpy(destination + EMAIL_OFFSET, &(source->email), EMAIL_SIZE);
-+}
-+
-+void deserialize_row(void* source, Row* destination) {
-+  memcpy(&(destination->id), source + ID_OFFSET, ID_SIZE);
-+  memcpy(&(destination->username), source + USERNAME_OFFSET, USERNAME_SIZE);
-+  memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
-+}
- */
+
 #[derive(Debug)]
 struct InputBuffer {
     buffer: Option<String>,
@@ -88,7 +90,34 @@ impl InputBuffer {
          }
     }
 }
+#[derive(Debug)]
+struct Table {
+    num_rows: usize,
+    pages: [Option<[u8; PAGE_SIZE]>; TABLE_MAX_PAGES],
+}
+impl Table{
+    fn new() -> Self{
+        Table{
+            num_rows: 0,
+            pages: [None; TABLE_MAX_PAGES]
+        }
+    }
+    fn row_slot(&mut self, row_id: usize) -> Option<&mut [u8]>{
+        let page_num = row_id / ROWS_PER_PAGE;
+        if page_num >= TABLE_MAX_PAGES{
+            return None;
+        }
+        let row_offset = row_id  % ROWS_PER_PAGE;
+        let byte_offset = row_offset * ROW_SIZE;
+        if self.pages[page_num].is_none() {
+            self.pages[page_num] = Some([0; PAGE_SIZE]);
+        }
+        let page = self.pages[page_num].as_mut().unwrap();
+        Some(&mut page[byte_offset..byte_offset + ROW_SIZE])
+    }
+}
 fn main() {
+    let mut table = Table::new();
     loop {
         let mut input_buffer = InputBuffer::new();
         read_input(&mut input_buffer);
@@ -96,31 +125,38 @@ fn main() {
             MetaCommandResult::MetaCommandSuccess => {
                 break;
             },
-            MetaCommandResult::MetaCommandUnrecognizedCommand => println!("Unrecognized command {}", &input_buffer.buffer.clone().unwrap()),
+            MetaCommandResult::MetaCommandUnrecognizedCommand => {
+
+            },
             MetaCommandResult::MetaNoCommand => println!("No command is selected")
         }
         let mut statement = Statement::new();
         match prepare_statement(&input_buffer, &mut statement) {
             PrepareResult::PrepareSuccess => {
                 println!("Prepare success {:?}", statement);
-                let mut buffer: Vec<u8> = vec![0; ID_SIZE + USERNAME_SIZE + EMAIL_SIZE];
-
-                serialize_row(&statement.row_to_insert, &mut buffer);
-                println!("serialization {:?}", buffer);
-                let mut destination_row = Row::new();
-
-                deserialize_row(&buffer, &mut destination_row);
-                println!("deserialization {:?}", destination_row);
-                assert_eq!(statement.row_to_insert.id, destination_row.id);
-                assert_eq!(&statement.row_to_insert.username, &destination_row.username);
-                assert_eq!(&statement.row_to_insert.email, &destination_row.email);
             },
             PrepareResult::PrepareUnrecognizedStatement => {
                 println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
             }
-            _ => {}
+            PrepareResult::PrepareSyntaxError => {
+                println!("Syntax error: could not parse statement");
+                continue;
+            }
         }
-        execute_statement(&mut statement);
+        match execute_statement(&mut statement, &mut table){
+            ExecuteSuccess => {
+                println!("Query executed successfully");
+            }
+            ExecuteResult::ExecuteTableFull => {
+                println!("Insert is not allowed, Table is full");
+                continue;
+            }
+            ExecuteResult::ExecuteFail => {
+                println!("Query execution failed");
+                continue;
+            }
+        }
+
     }
 }
 fn print_prompt() {
@@ -176,22 +212,40 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
     PrepareResult::PrepareUnrecognizedStatement
 }
 
-fn execute_statement(statement: &mut Statement){
-    match &statement.statement_type {
+fn execute_statement(statement: &Statement, table: &mut Table) -> ExecuteResult{
+    return match &statement.statement_type {
         None => {
             println!("The statement is not valid for execution");
+            ExecuteResult::ExecuteFail
         }
         Some(stmt) => {
             match stmt {
                 StatementType::StatementInsert => {
-                    println!("Insert statement is being executed");
+                    execute_insert(statement, table)
                 }
                 StatementType::StatementSelect => {
-                    println!("Select statement is being executed");
+                    execute_select(statement, table)
                 }
             }
         }
     }
+}
+fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult{
+    if table.num_rows >= TABLE_MAX_ROWS {
+        return ExecuteResult::ExecuteTableFull;
+    }
+    serialize_row(&statement.row_to_insert, table.row_slot(table.num_rows).unwrap());
+    table.num_rows += 1;
+
+    ExecuteSuccess
+}
+fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult{
+    let mut row = Row::new();
+    for i in 0..table.num_rows{
+        deserialize_row(table.row_slot(i).unwrap(), &mut row);
+        println!("Row {} {:?}", i, row);
+    }
+    ExecuteSuccess
 }
 
 fn serialize_row(source: &Row, destination: &mut [u8]){
