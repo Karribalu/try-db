@@ -4,6 +4,8 @@ use std::clone::Clone;
 use std::mem::size_of;
 
 use scan_fmt::scan_fmt;
+
+use crate::Error::{ExecuteError, PrepareError, PrepareStringTooLong, TableFull};
 use crate::ExecuteResult::ExecuteSuccess;
 
 const ID_SIZE: usize = size_of::<i32>();
@@ -32,13 +34,26 @@ enum StatementType{
 enum PrepareResult{
     PrepareSuccess,
     PrepareUnrecognizedStatement,
-    PrepareSyntaxError
+    PrepareSyntaxError,
+    PrepareStringTooLong,
+    PrepareNegativeId
 }
 
 enum ExecuteResult{
     ExecuteSuccess,
     ExecuteTableFull,
     ExecuteFail
+}
+#[derive(Debug)]
+enum Error {
+    MetaCommandError,
+    MetaCommandExit,
+    MetaNoCommand,
+    PrepareError,
+    ExecuteError,
+    PrepareStringTooLong,
+    PrepareNegativeId,
+    TableFull
 }
 #[derive(Debug)]
 struct Row{
@@ -121,43 +136,71 @@ fn main() {
     loop {
         let mut input_buffer = InputBuffer::new();
         read_input(&mut input_buffer);
-        match do_meta_command(&input_buffer){
-            MetaCommandResult::MetaCommandSuccess => {
+        let res = process_input(&mut input_buffer, &mut table);
+        match res{
+            Ok(_) => {},
+            Err(Error::MetaCommandError) => {
                 break;
             },
-            MetaCommandResult::MetaCommandUnrecognizedCommand => {
-
+            Err(Error::MetaNoCommand) => {
+                break;
             },
-            MetaCommandResult::MetaNoCommand => println!("No command is selected")
+            Err(Error::MetaCommandExit) => {
+                break;
+            }
+            _ => {}
         }
-        let mut statement = Statement::new();
-        match prepare_statement(&input_buffer, &mut statement) {
-            PrepareResult::PrepareSuccess => {
-                println!("Prepare success {:?}", statement);
-            },
-            PrepareResult::PrepareUnrecognizedStatement => {
-                println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
-            }
-            PrepareResult::PrepareSyntaxError => {
-                println!("Syntax error: could not parse statement");
-                continue;
-            }
-        }
-        match execute_statement(&mut statement, &mut table){
-            ExecuteSuccess => {
-                println!("Query executed successfully");
-            }
-            ExecuteResult::ExecuteTableFull => {
-                println!("Insert is not allowed, Table is full");
-                continue;
-            }
-            ExecuteResult::ExecuteFail => {
-                println!("Query execution failed");
-                continue;
-            }
-        }
-
     }
+}
+fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<(), Error >{
+    match do_meta_command(&input_buffer){
+        MetaCommandResult::MetaCommandSuccess => {
+            Err(Error::MetaCommandExit)
+        },
+        MetaCommandResult::MetaCommandUnrecognizedCommand => {
+            Ok(Error::MetaCommandError)
+        },
+        MetaCommandResult::MetaNoCommand => {
+            println!("No command is selected");
+            Err(Error::MetaNoCommand)
+        }
+    }?;
+    let mut statement = Statement::new();
+    match prepare_statement(&input_buffer, &mut statement) {
+        PrepareResult::PrepareSuccess => {
+            // println!("Prepare success {:?}", statement);
+            Ok(())
+        },
+        PrepareResult::PrepareUnrecognizedStatement => {
+            println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
+            Ok(())
+        }
+        PrepareResult::PrepareSyntaxError => {
+            println!("Syntax error: could not parse statement");
+            Err(PrepareError)
+        },
+        PrepareResult::PrepareStringTooLong => {
+            Err(PrepareStringTooLong)
+        },
+        PrepareResult::PrepareNegativeId => {
+            Err(Error::PrepareNegativeId)
+        }
+    }?;
+    match execute_statement(&mut statement, table){
+        ExecuteSuccess => {
+            // println!("Query executed successfully");
+            Ok(())
+        }
+        ExecuteResult::ExecuteTableFull => {
+            println!("Insert is not allowed, Table is full");
+            Err(TableFull)
+        }
+        ExecuteResult::ExecuteFail => {
+            println!("Query execution failed");
+            Err(ExecuteError)
+        }
+    }?;
+    Ok(())
 }
 fn print_prompt() {
     println!("db -> ");
@@ -192,6 +235,12 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
                 statement.statement_type = Some(StatementType::StatementInsert);
                 match scan_fmt!(buffer_data, "insert {} {} {}", i32, String, String) {
                     Ok((id, name, email)) => {
+                        if id < 0{
+                            return PrepareResult::PrepareNegativeId;
+                        }
+                        if email.len() > EMAIL_SIZE || name.len() > USERNAME_SIZE{
+                           return PrepareResult::PrepareStringTooLong;
+                        }
                         statement.row_to_insert.id = id;
                         statement.row_to_insert.email = email;
                         statement.row_to_insert.username = name;
@@ -287,5 +336,58 @@ fn deserialize_row(source: &[u8], destination: &mut Row) {
         // Copy Email
         let email_bytes = &source[EMAIL_OFFSET..EMAIL_OFFSET + EMAIL_SIZE];
         destination.email = String::from_utf8_lossy(email_bytes).trim_end_matches('\0').to_string();
+    }
+}
+#[cfg(test)]
+mod tests{
+    use crate::{Error, InputBuffer, process_input, Table};
+
+    #[test]
+    fn test_inserting_and_retrieving_a_row(){
+        let mut table = Table::new();
+        let mut input_buffer = InputBuffer::new();
+        let str = String::from("insert 1 bala bala@gmail.com");
+        input_buffer.buffer_length = str.len() as i32;
+        input_buffer.buffer = Some(str);
+        let _ = process_input(&mut input_buffer, &mut table);
+        assert_eq!(table.num_rows, 1);
+    }
+    #[test]
+    fn test_table_full(){
+        let mut table = Table::new();
+        let mut input_buffer = InputBuffer::new();
+        for i in 0..1400{
+            let str = format!("insert {} bala bala@gmail.com", i);
+            input_buffer.buffer_length = str.len() as i32;
+            input_buffer.buffer = Some(str);
+            let _ = process_input(&mut input_buffer, &mut table);
+        }
+        let res = process_input(&mut input_buffer, &mut table);
+        assert!(matches!(res, Err(Error::TableFull)));
+    }
+
+    #[test]
+    fn allows_inserting_strings_with_maximum_length(){
+        let long_username = "a".repeat(33);
+        let long_email = "a".repeat(255);
+        let mut table = Table::new();
+        let mut input_buffer = InputBuffer::new();
+        let str = format!("insert 1 {} {}", long_username, long_email);
+        input_buffer.buffer_length = str.len() as i32;
+        input_buffer.buffer = Some(str);
+        let res = process_input(&mut input_buffer, &mut table);
+        assert!(matches!(res, Err(Error::PrepareStringTooLong)));
+    }
+    #[test]
+    fn allows_inserting_negative_id(){
+        let long_username = "a".to_string();
+        let long_email = "b".to_string();
+        let mut table = Table::new();
+        let mut input_buffer = InputBuffer::new();
+        let str = format!("insert -10 {} {}", long_username, long_email);
+        input_buffer.buffer_length = str.len() as i32;
+        input_buffer.buffer = Some(str);
+        let res = process_input(&mut input_buffer, &mut table);
+        assert!(matches!(res, Err(Error::PrepareNegativeId)));
     }
 }
