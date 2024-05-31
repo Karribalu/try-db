@@ -1,4 +1,4 @@
-use std::{env, io, ptr};
+use std::{io, ptr};
 use std::borrow::ToOwned;
 use std::clone::Clone;
 use std::fs::{File, OpenOptions};
@@ -25,29 +25,33 @@ const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
-enum MetaCommandResult{
+enum MetaCommandResult {
     MetaCommandSuccess,
     MetaCommandUnrecognizedCommand,
-    MetaNoCommand
+    MetaNoCommand,
 }
+
 #[derive(Debug)]
-enum StatementType{
+enum StatementType {
     StatementInsert,
-    StatementSelect
+    StatementSelect,
 }
-enum PrepareResult{
+
+enum PrepareResult {
     PrepareSuccess,
     PrepareUnrecognizedStatement,
     PrepareSyntaxError,
     PrepareStringTooLong,
-    PrepareNegativeId
+    PrepareNegativeId,
 }
+
 #[derive(Debug)]
-enum ExecuteResult{
+enum ExecuteResult {
     ExecuteSuccess,
     ExecuteTableFull,
-    ExecuteFail
+    ExecuteFail,
 }
+
 #[derive(Debug)]
 enum Error {
     MetaCommandError,
@@ -58,19 +62,20 @@ enum Error {
     PrepareStringTooLong,
     PrepareNegativeId,
     TableFull,
-    DbOpenError
+    DbOpenError,
 }
-enum RowSlotError{
 
-}
+enum RowSlotError {}
+
 #[derive(Debug)]
-struct Row{
+struct Row {
     id: i32,
     username: String,
-    email: String
+    email: String,
 }
-impl Row{
-    fn new() -> Self{
+
+impl Row {
+    fn new() -> Self {
         Row {
             id: 0,
             username: String::with_capacity(32),
@@ -78,15 +83,16 @@ impl Row{
         }
     }
 }
+
 #[derive(Debug)]
 struct Statement {
     statement_type: Option<StatementType>,
-    row_to_insert: Row
+    row_to_insert: Row,
 }
 
-impl Statement{
+impl Statement {
     fn new() -> Statement {
-        Statement{
+        Statement {
             statement_type: None,
             row_to_insert: Row {
                 id: 0,
@@ -104,36 +110,40 @@ struct InputBuffer {
     buffer_length: i32,
     input_length: i32,
 }
+
 impl InputBuffer {
     fn new() -> InputBuffer {
-        InputBuffer { 
+        InputBuffer {
             buffer: None,
             buffer_length: 0,
-            input_length: 0
-         }
+            input_length: 0,
+        }
     }
 }
+
 #[derive(Debug)]
-struct Pager{
+struct Pager {
     file: Rc<File>,
     file_length: u64,
     pages: Vec<Option<Box<[u8; PAGE_SIZE]>>>,
 }
+
 #[derive(Debug)]
 struct Table {
     num_rows: usize,
-    pager: Pager
+    pager: Pager,
 }
-impl Pager{
-    fn new(file: Rc<File>, file_length: u64) -> Self{
-        Pager{
+
+impl Pager {
+    fn new(file: Rc<File>, file_length: u64) -> Self {
+        Pager {
             file,
             file_length,
-            pages: vec![None; TABLE_MAX_PAGES]
+            pages: vec![None; TABLE_MAX_PAGES],
         }
     }
-    fn pager_flush(&mut self, page_num: usize, page_size: usize) -> io::Result<()>{
-        if(page_num > TABLE_MAX_PAGES){
+    fn pager_flush(&mut self, page_num: usize, page_size: usize) -> io::Result<()> {
+        if (page_num > TABLE_MAX_PAGES) {
             eprintln!("Tried to flush a out of bound page");
             std::process::exit(1);
         }
@@ -145,6 +155,7 @@ impl Pager{
         let page = self.pages[page_num].as_ref().unwrap();
         let mut file = Rc::get_mut(&mut self.file).unwrap();
         file.seek(SeekFrom::Start(offset))?;
+        println!("{:?}", &page[page_num]);
         let bytes_written = file.write(&page[..page_size])?;
         if bytes_written != page_size {
             eprintln!("Error writing: only {} bytes written out of {}", bytes_written, page_size);
@@ -152,16 +163,16 @@ impl Pager{
         }
         Ok(())
     }
-
 }
-fn get_page(pager: &mut Pager, page_num: usize) -> Result<&mut [u8; PAGE_SIZE], io::Error>  {
+
+fn get_page(pager: &mut Pager, page_num: usize) -> Result<&mut [u8; PAGE_SIZE], io::Error> {
     if *&pager.pages[page_num].is_none() {
         let mut page: Box<[u8; PAGE_SIZE]> = Box::new([0; PAGE_SIZE]);
         let mut num_pages = pager.file_length as usize / PAGE_SIZE;
-        if pager.file_length as usize % PAGE_SIZE != 0{
+        if pager.file_length as usize % PAGE_SIZE != 0 {
             num_pages += 1;
         }
-        if page_num < num_pages{
+        if page_num < num_pages {
             let offset = (page_num * PAGE_SIZE) as u64;
             let mut file = Rc::get_mut(&mut pager.file).unwrap();
             file.seek(SeekFrom::Start(offset))?;
@@ -171,7 +182,8 @@ fn get_page(pager: &mut Pager, page_num: usize) -> Result<&mut [u8; PAGE_SIZE], 
     }
     Ok(pager.pages[page_num].as_mut().unwrap())
 }
-fn pager_open(filename: &str) -> io::Result<Pager>{
+
+fn pager_open(filename: &str) -> io::Result<Pager> {
     let mut file = Rc::new(OpenOptions::new()
         .read(true)
         .write(true)
@@ -182,58 +194,64 @@ fn pager_open(filename: &str) -> io::Result<Pager>{
     let file_length = Rc::get_mut(&mut file).unwrap().seek(SeekFrom::End(0))?;
     Ok(Pager::new(file, file_length))
 }
-impl Table{
-    fn new() -> Self{
-        Table{
-            num_rows: 0,
-            pager: pager_open(&"try-db.db").unwrap()
+
+impl Table {
+    // fn new() -> Self {
+    //     Table {
+    //         num_rows: 0,
+    //         pager: Pager::new(),
+    //     }
+    // }
+    fn open_from_file(file_name: &str) -> Result<Self, Error> {
+        let pager = pager_open(file_name);
+        match pager {
+            Ok(pager) => {
+                Ok(Table {
+                    num_rows: pager.file_length as usize / PAGE_SIZE * ROWS_PER_PAGE,
+                    pager,
+                })
+            }
+            Err(_) => {
+                Err(Error::DbOpenError)
+            }
         }
+
     }
-    fn row_slot(&mut self, row_id: usize) -> Result<&mut[u8], ExecuteResult >{
+    fn row_slot(&mut self, row_id: usize) -> Result<&mut [u8], ExecuteResult> {
         let page_num = row_id / ROWS_PER_PAGE;
-        if page_num > TABLE_MAX_PAGES{
+        if page_num > TABLE_MAX_PAGES {
             return Err(ExecuteTableFull);
         }
         let page = get_page(&mut self.pager, page_num);
-        match page{
+        match page {
             Ok(page) => {
-                let row_offset = row_id  % ROWS_PER_PAGE;
+                let row_offset = row_id % ROWS_PER_PAGE;
                 let byte_offset = row_offset * ROW_SIZE;
                 Ok(&mut page[byte_offset..byte_offset + ROW_SIZE])
-            },
+            }
             Err(_err) => {
                 Err(ExecuteResult::ExecuteFail)
             }
         }
     }
 }
-fn dp_open(filename: &str) -> Result<Table, Error> {
-    let pager = pager_open(filename);
-    match pager {
-        Ok(pager) => {
-            Ok(Table{
-                num_rows: 0,
-                pager
-            })
-        }
-        Err(err) => {
-            Err(Error::DbOpenError)
-        }
-    }
 
+fn dp_open(filename: &str) -> Result<Table, Error> {
+    Table::open_from_file(filename)
 }
-fn db_close(table: &mut Table){
+
+fn db_close(table: &mut Table) {
     let mut pager = &mut table.pager;
     let num_full_pages = table.num_rows / ROWS_PER_PAGE;
-    for i in 0..num_full_pages{
-        if pager.pages[i].is_none(){
+    for i in 0..num_full_pages {
+        if pager.pages[i].is_none() {
             continue;
         }
         pager.pager_flush(i, PAGE_SIZE).expect("Flush Error");
         pager.pages[i] = None;
     }
     let additional_rows = table.num_rows % ROWS_PER_PAGE;
-    if additional_rows > 0{
+    if additional_rows > 0 {
         let page_num = num_full_pages;
         if !pager.pages[page_num].is_none() {
             pager.pager_flush(page_num, PAGE_SIZE).expect("Flush Error");
@@ -241,6 +259,7 @@ fn db_close(table: &mut Table){
         }
     }
 }
+
 fn main() {
     let mut db_name = String::new();
     io::stdin().read_line(&mut db_name).unwrap();
@@ -251,14 +270,14 @@ fn main() {
                 let mut input_buffer = InputBuffer::new();
                 read_input(&mut input_buffer);
                 let res = process_input(&mut input_buffer, &mut table);
-                match res{
-                    Ok(_) => {},
+                match res {
+                    Ok(_) => {}
                     Err(Error::MetaCommandError) => {
                         break;
-                    },
+                    }
                     Err(Error::MetaNoCommand) => {
                         break;
-                    },
+                    }
                     Err(Error::MetaCommandExit) => {
                         break;
                     }
@@ -268,18 +287,19 @@ fn main() {
             db_close(&mut table);
         }
         Err(err) => {
-            println!("{:?}",err);
+            println!("{:?}", err);
         }
     }
 }
-fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<(), Error >{
-    match do_meta_command(&input_buffer){
+
+fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<(), Error> {
+    match do_meta_command(&input_buffer) {
         MetaCommandResult::MetaCommandSuccess => {
             Err(Error::MetaCommandExit)
-        },
+        }
         MetaCommandResult::MetaCommandUnrecognizedCommand => {
             Ok(Error::MetaCommandError)
-        },
+        }
         MetaCommandResult::MetaNoCommand => {
             println!("No command is selected");
             Err(Error::MetaNoCommand)
@@ -290,7 +310,7 @@ fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<()
         PrepareResult::PrepareSuccess => {
             // println!("Prepare success {:?}", statement);
             Ok(())
-        },
+        }
         PrepareResult::PrepareUnrecognizedStatement => {
             println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
             Ok(())
@@ -298,15 +318,15 @@ fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<()
         PrepareResult::PrepareSyntaxError => {
             println!("Syntax error: could not parse statement");
             Err(PrepareError)
-        },
+        }
         PrepareResult::PrepareStringTooLong => {
             Err(PrepareStringTooLong)
-        },
+        }
         PrepareResult::PrepareNegativeId => {
             Err(Error::PrepareNegativeId)
         }
     }?;
-    match execute_statement(&mut statement, table){
+    match execute_statement(&mut statement, table) {
         ExecuteSuccess => {
             // println!("Query executed successfully");
             Ok(())
@@ -322,44 +342,48 @@ fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<()
     }?;
     Ok(())
 }
+
 fn print_prompt() {
-    println!("db -> ");
+    print!("db -> ");
+    io::stdout().flush().unwrap();
 }
+
 fn read_input(buffer: &mut InputBuffer) {
     let mut input = String::new();
     print_prompt();
     let n = io::stdin().read_line(&mut input).unwrap();
     if n == 1 {
         buffer.buffer = None;
-    }else{
+    } else {
         buffer.input_length = n as i32 - 1;
         buffer.buffer = Some(input.trim_end().to_owned());
     }
 }
-fn do_meta_command(input_buffer: &InputBuffer) -> MetaCommandResult{
-    if let Some(buffer_data) = &input_buffer.buffer{
-        if buffer_data.eq(".exit"){
+
+fn do_meta_command(input_buffer: &InputBuffer) -> MetaCommandResult {
+    if let Some(buffer_data) = &input_buffer.buffer {
+        if buffer_data.eq(".exit") {
             MetaCommandResult::MetaCommandSuccess
-        }else{
+        } else {
             MetaCommandResult::MetaCommandUnrecognizedCommand
         }
-    }else{
+    } else {
         MetaCommandResult::MetaNoCommand
     }
 }
 
-fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> PrepareResult{
+fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> PrepareResult {
     if let Some(buffer_data) = &input_buffer.buffer {
         return match &buffer_data[..6] {
             "insert" => {
                 statement.statement_type = Some(StatementType::StatementInsert);
                 match scan_fmt!(buffer_data, "insert {} {} {}", i32, String, String) {
                     Ok((id, name, email)) => {
-                        if id < 0{
+                        if id < 0 {
                             return PrepareResult::PrepareNegativeId;
                         }
-                        if email.len() > EMAIL_SIZE || name.len() > USERNAME_SIZE{
-                           return PrepareResult::PrepareStringTooLong;
+                        if email.len() > EMAIL_SIZE || name.len() > USERNAME_SIZE {
+                            return PrepareResult::PrepareStringTooLong;
                         }
                         statement.row_to_insert.id = id;
                         statement.row_to_insert.email = email;
@@ -370,18 +394,18 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
                         PrepareResult::PrepareSyntaxError
                     }
                 }
-            },
+            }
             "select" => {
                 statement.statement_type = Some(StatementType::StatementSelect);
                 PrepareResult::PrepareSuccess
-            },
+            }
             _ => PrepareResult::PrepareUnrecognizedStatement
-        }
+        };
     }
     PrepareResult::PrepareUnrecognizedStatement
 }
 
-fn execute_statement(statement: &Statement, table: &mut Table) -> ExecuteResult{
+fn execute_statement(statement: &Statement, table: &mut Table) -> ExecuteResult {
     return match &statement.statement_type {
         None => {
             println!("The statement is not valid for execution");
@@ -397,9 +421,10 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> ExecuteResult{
                 }
             }
         }
-    }
+    };
 }
-fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult{
+
+fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
     if table.num_rows >= TABLE_MAX_ROWS {
         return ExecuteTableFull;
     }
@@ -408,40 +433,42 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult{
 
     ExecuteSuccess
 }
-fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult{
+
+fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult {
     let mut row = Row::new();
-    for i in 0..table.num_rows{
+    for i in 0..table.num_rows {
         deserialize_row(table.row_slot(i).unwrap(), &mut row);
         println!("Row {} {:?}", i, row);
     }
     ExecuteSuccess
 }
 
-fn serialize_row(source: &Row, destination: &mut [u8]){
+fn serialize_row(source: &Row, destination: &mut [u8]) {
     unsafe {
         ptr::copy_nonoverlapping(
             &source.id as *const i32 as *const u8,
             destination.as_mut_ptr().add(ID_OFFSET),
-            ID_SIZE
+            ID_SIZE,
         );
         let username_bytes = source.username.as_bytes();
         ptr::copy_nonoverlapping(
             username_bytes.as_ptr(),
             destination.as_mut_ptr().add(USERNAME_OFFSET),
-            USERNAME_SIZE
+            USERNAME_SIZE,
         );
         let email_bytes = source.email.as_bytes();
         let email_length = email_bytes.len().min(EMAIL_SIZE);
         ptr::copy_nonoverlapping(
             email_bytes.as_ptr(),
             destination.as_mut_ptr().add(EMAIL_OFFSET),
-            email_length
+            email_length,
         );
         if email_length < EMAIL_SIZE {
             ptr::write_bytes(destination.as_mut_ptr().add(EMAIL_OFFSET + email_length), 0, EMAIL_SIZE - email_length);
         }
     }
 }
+
 fn deserialize_row(source: &[u8], destination: &mut Row) {
     unsafe {
         ptr::copy_nonoverlapping(
@@ -457,12 +484,13 @@ fn deserialize_row(source: &[u8], destination: &mut Row) {
         destination.email = String::from_utf8_lossy(email_bytes).trim_end_matches('\0').to_string();
     }
 }
+
 #[cfg(test)]
-mod tests{
+mod tests {
     use crate::{Error, InputBuffer, process_input, Table};
 
     #[test]
-    fn test_inserting_and_retrieving_a_row(){
+    fn test_inserting_and_retrieving_a_row() {
         let mut table = Table::new();
         let mut input_buffer = InputBuffer::new();
         let str = String::from("insert 1 bala bala@gmail.com");
@@ -471,11 +499,12 @@ mod tests{
         let _ = process_input(&mut input_buffer, &mut table);
         assert_eq!(table.num_rows, 1);
     }
+
     #[test]
-    fn test_table_full(){
+    fn test_table_full() {
         let mut table = Table::new();
         let mut input_buffer = InputBuffer::new();
-        for i in 0..1400{
+        for i in 0..1400 {
             let str = format!("insert {} bala bala@gmail.com", i);
             input_buffer.buffer_length = str.len() as i32;
             input_buffer.buffer = Some(str);
@@ -486,7 +515,7 @@ mod tests{
     }
 
     #[test]
-    fn allows_inserting_strings_with_maximum_length(){
+    fn allows_inserting_strings_with_maximum_length() {
         let long_username = "a".repeat(33);
         let long_email = "a".repeat(255);
         let mut table = Table::new();
@@ -497,8 +526,9 @@ mod tests{
         let res = process_input(&mut input_buffer, &mut table);
         assert!(matches!(res, Err(Error::PrepareStringTooLong)));
     }
+
     #[test]
-    fn allows_inserting_negative_id(){
+    fn allows_inserting_negative_id() {
         let long_username = "a".to_string();
         let long_email = "b".to_string();
         let mut table = Table::new();
