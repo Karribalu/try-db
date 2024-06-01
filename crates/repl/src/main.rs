@@ -1,11 +1,13 @@
 use std::{io, ptr};
 use std::borrow::ToOwned;
 use std::clone::Clone;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::rc::Rc;
+use std::time::Instant;
 
 use scan_fmt::scan_fmt;
 
@@ -24,6 +26,8 @@ const PAGE_SIZE: usize = 4096;
 const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+// const NUM_ROWS_FILLED_FOR_PAGE_OFFSET: usize = 0;
+// const NUM_ROWS_FILLED_FOR_PAGE_SIZE: usize =  size_of::<i32>();
 
 enum MetaCommandResult {
     MetaCommandSuccess,
@@ -64,8 +68,6 @@ enum Error {
     TableFull,
     DbOpenError,
 }
-
-enum RowSlotError {}
 
 #[derive(Debug)]
 struct Row {
@@ -143,7 +145,7 @@ impl Pager {
         }
     }
     fn pager_flush(&mut self, page_num: usize, page_size: usize) -> io::Result<()> {
-        if (page_num > TABLE_MAX_PAGES) {
+        if page_num > TABLE_MAX_PAGES {
             eprintln!("Tried to flush a out of bound page");
             std::process::exit(1);
         }
@@ -153,7 +155,7 @@ impl Pager {
         }
         let offset = (page_num * PAGE_SIZE) as u64;
         let page = self.pages[page_num].as_ref().unwrap();
-        let mut file = Rc::get_mut(&mut self.file).unwrap();
+        let file = Rc::get_mut(&mut self.file).unwrap();
         file.seek(SeekFrom::Start(offset))?;
         println!("{:?}", &page[page_num]);
         let bytes_written = file.write(&page[..page_size])?;
@@ -184,30 +186,68 @@ fn get_page(pager: &mut Pager, page_num: usize) -> Result<&mut [u8; PAGE_SIZE], 
 }
 
 fn pager_open(filename: &str) -> io::Result<Pager> {
+    let db_dir = Path::new("db");
+    // Create the db directory if it doesn't exist
+    create_dir_all(db_dir)?;
+    let file_path = db_dir.join(filename);
     let mut file = Rc::new(OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .mode(0o600)
-        .open(filename)?
+        .open(file_path)?
     );
     let file_length = Rc::get_mut(&mut file).unwrap().seek(SeekFrom::End(0))?;
     Ok(Pager::new(file, file_length))
 }
 
+fn get_num_rows(pager: &mut Pager) -> usize {
+    let file = Rc::get_mut(&mut pager.file).unwrap();
+    let mut num_rows = 0;
+    for i in (0..pager.file_length).step_by(ROW_SIZE) {
+        let mut row = [0; ROW_SIZE];
+        file.seek(SeekFrom::Start(i)).expect("Some error while seeking");
+        file.read(&mut row).expect("error while reading");
+        if is_empty_row(&row) {
+            return num_rows;
+        }
+        num_rows += 1;
+    }
+    num_rows
+}
+
+fn is_empty_row(row: &[u8]) -> bool {
+    let mut is_empty = true;
+    for i in row {
+        if i & 1 != 0 {
+            is_empty = false;
+            break;
+        }
+    }
+    is_empty
+}
+
 impl Table {
-    // fn new() -> Self {
-    //     Table {
-    //         num_rows: 0,
-    //         pager: Pager::new(),
-    //     }
-    // }
+    fn new() -> Self {
+        let file = Rc::new(OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open("try-db.db")
+            .expect("Error while opening the file")
+        );
+        Table {
+            num_rows: 0,
+            pager: Pager::new(file, 0),
+        }
+    }
     fn open_from_file(file_name: &str) -> Result<Self, Error> {
         let pager = pager_open(file_name);
         match pager {
-            Ok(pager) => {
+            Ok(mut pager) => {
                 Ok(Table {
-                    num_rows: pager.file_length as usize / PAGE_SIZE * ROWS_PER_PAGE,
+                    num_rows: get_num_rows(&mut pager),
                     pager,
                 })
             }
@@ -215,7 +255,6 @@ impl Table {
                 Err(Error::DbOpenError)
             }
         }
-
     }
     fn row_slot(&mut self, row_id: usize) -> Result<&mut [u8], ExecuteResult> {
         let page_num = row_id / ROWS_PER_PAGE;
@@ -241,7 +280,7 @@ fn dp_open(filename: &str) -> Result<Table, Error> {
 }
 
 fn db_close(table: &mut Table) {
-    let mut pager = &mut table.pager;
+    let pager = &mut table.pager;
     let num_full_pages = table.num_rows / ROWS_PER_PAGE;
     for i in 0..num_full_pages {
         if pager.pages[i].is_none() {
@@ -263,13 +302,16 @@ fn db_close(table: &mut Table) {
 fn main() {
     let mut db_name = String::new();
     io::stdin().read_line(&mut db_name).unwrap();
-    let mut table = dp_open(&db_name.trim_end());
+    let table = dp_open(&db_name.trim_end());
     match table {
         Ok(mut table) => {
             loop {
                 let mut input_buffer = InputBuffer::new();
                 read_input(&mut input_buffer);
+                let start = Instant::now();
                 let res = process_input(&mut input_buffer, &mut table);
+                let elapsed = start.elapsed();
+                println!("It took {:?}", elapsed);
                 match res {
                     Ok(_) => {}
                     Err(Error::MetaCommandError) => {
@@ -284,7 +326,10 @@ fn main() {
                     _ => {}
                 }
             }
+            let start = Instant::now();
             db_close(&mut table);
+            let elapsed = start.elapsed();
+            println!("It took for closing{:?}", elapsed);
         }
         Err(err) => {
             println!("{:?}", err);
@@ -434,7 +479,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
     ExecuteSuccess
 }
 
-fn execute_select(statement: &Statement, table: &mut Table) -> ExecuteResult {
+fn execute_select(_: &Statement, table: &mut Table) -> ExecuteResult {
     let mut row = Row::new();
     for i in 0..table.num_rows {
         deserialize_row(table.row_slot(i).unwrap(), &mut row);
