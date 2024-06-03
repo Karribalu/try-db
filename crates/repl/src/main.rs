@@ -1,5 +1,4 @@
-use std::{io, ptr};
-use std::borrow::ToOwned;
+use std::borrow::{BorrowMut, ToOwned};
 use std::clone::Clone;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -8,6 +7,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
+use std::{io, ptr};
 
 use scan_fmt::scan_fmt;
 
@@ -105,7 +105,6 @@ impl Statement {
     }
 }
 
-
 #[derive(Debug)]
 struct InputBuffer {
     buffer: Option<String>,
@@ -160,7 +159,10 @@ impl Pager {
         println!("{:?}", &page[page_num]);
         let bytes_written = file.write(&page[..page_size])?;
         if bytes_written != page_size {
-            eprintln!("Error writing: only {} bytes written out of {}", bytes_written, page_size);
+            eprintln!(
+                "Error writing: only {} bytes written out of {}",
+                bytes_written, page_size
+            );
             std::process::exit(1);
         }
         Ok(())
@@ -190,12 +192,13 @@ fn pager_open(filename: &str) -> io::Result<Pager> {
     // Create the db directory if it doesn't exist
     create_dir_all(db_dir)?;
     let file_path = db_dir.join(filename);
-    let mut file = Rc::new(OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .open(file_path)?
+    let mut file = Rc::new(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .mode(0o600)
+            .open(file_path)?,
     );
     let file_length = Rc::get_mut(&mut file).unwrap().seek(SeekFrom::End(0))?;
     Ok(Pager::new(file, file_length))
@@ -206,7 +209,8 @@ fn get_num_rows(pager: &mut Pager) -> usize {
     let mut num_rows = 0;
     for i in (0..pager.file_length).step_by(ROW_SIZE) {
         let mut row = [0; ROW_SIZE];
-        file.seek(SeekFrom::Start(i)).expect("Some error while seeking");
+        file.seek(SeekFrom::Start(i))
+            .expect("Some error while seeking");
         file.read(&mut row).expect("error while reading");
         if is_empty_row(&row) {
             return num_rows;
@@ -229,13 +233,14 @@ fn is_empty_row(row: &[u8]) -> bool {
 
 impl Table {
     fn new() -> Self {
-        let file = Rc::new(OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .open("try-db.db")
-            .expect("Error while opening the file")
+        let file = Rc::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .open("try-db.db")
+                .expect("Error while opening the file"),
         );
         Table {
             num_rows: 0,
@@ -245,36 +250,59 @@ impl Table {
     fn open_from_file(file_name: &str) -> Result<Self, Error> {
         let pager = pager_open(file_name);
         match pager {
-            Ok(mut pager) => {
-                Ok(Table {
-                    num_rows: get_num_rows(&mut pager),
-                    pager,
-                })
-            }
-            Err(_) => {
-                Err(Error::DbOpenError)
-            }
-        }
-    }
-    fn row_slot(&mut self, row_id: usize) -> Result<&mut [u8], ExecuteResult> {
-        let page_num = row_id / ROWS_PER_PAGE;
-        if page_num > TABLE_MAX_PAGES {
-            return Err(ExecuteTableFull);
-        }
-        let page = get_page(&mut self.pager, page_num);
-        match page {
-            Ok(page) => {
-                let row_offset = row_id % ROWS_PER_PAGE;
-                let byte_offset = row_offset * ROW_SIZE;
-                Ok(&mut page[byte_offset..byte_offset + ROW_SIZE])
-            }
-            Err(_err) => {
-                Err(ExecuteResult::ExecuteFail)
-            }
+            Ok(mut pager) => Ok(Table {
+                num_rows: get_num_rows(&mut pager),
+                pager,
+            }),
+            Err(_) => Err(Error::DbOpenError),
         }
     }
 }
+struct Cursor {
+    table: Table,
+    row_num: usize,
+    end_of_table: bool,
+}
+impl Cursor {
+    fn new(table: Table) -> Self {
+        Cursor {
+            table,
+            row_num: 0,
+            end_of_table: false,
+        }
+    }
+    fn table_start(&mut self) {
+        self.row_num = 0;
+        self.end_of_table = self.table.num_rows == 0;
+    }
+    fn table_end(&mut self) {
+        self.row_num = self.table.num_rows;
+        self.end_of_table = true;
+    }
+    fn cursor_advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true;
+        }
+    }
 
+    fn cursor_value(&mut self) -> Result<&mut [u8], ExecuteResult> {
+        let row_num = self.row_num;
+        let page_num = row_num / ROWS_PER_PAGE;
+        if page_num > TABLE_MAX_PAGES {
+            return Err(ExecuteTableFull);
+        }
+        let page = get_page(&mut self.table.pager, page_num);
+        match page {
+            Ok(page) => {
+                let row_offset = row_num % ROWS_PER_PAGE;
+                let byte_offset = row_offset * ROW_SIZE;
+                Ok(&mut page[byte_offset..byte_offset + ROW_SIZE])
+            }
+            Err(_err) => Err(ExecuteResult::ExecuteFail),
+        }
+    }
+}
 fn dp_open(filename: &str) -> Result<Table, Error> {
     Table::open_from_file(filename)
 }
@@ -305,11 +333,12 @@ fn main() {
     let table = dp_open(&db_name.trim_end());
     match table {
         Ok(mut table) => {
+            let mut cursor: Cursor = Cursor::new(table);
             loop {
                 let mut input_buffer = InputBuffer::new();
                 read_input(&mut input_buffer);
                 let start = Instant::now();
-                let res = process_input(&mut input_buffer, &mut table);
+                let res = process_input(&mut input_buffer, &mut cursor);
                 let elapsed = start.elapsed();
                 println!("It took {:?}", elapsed);
                 match res {
@@ -327,7 +356,7 @@ fn main() {
                 }
             }
             let start = Instant::now();
-            db_close(&mut table);
+            db_close(&mut cursor.table);
             let elapsed = start.elapsed();
             println!("It took for closing{:?}", elapsed);
         }
@@ -337,14 +366,10 @@ fn main() {
     }
 }
 
-fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<(), Error> {
+fn process_input(input_buffer: &mut InputBuffer, cursor: &mut Cursor) -> Result<(), Error> {
     match do_meta_command(&input_buffer) {
-        MetaCommandResult::MetaCommandSuccess => {
-            Err(Error::MetaCommandExit)
-        }
-        MetaCommandResult::MetaCommandUnrecognizedCommand => {
-            Ok(Error::MetaCommandError)
-        }
+        MetaCommandResult::MetaCommandSuccess => Err(Error::MetaCommandExit),
+        MetaCommandResult::MetaCommandUnrecognizedCommand => Ok(Error::MetaCommandError),
         MetaCommandResult::MetaNoCommand => {
             println!("No command is selected");
             Err(Error::MetaNoCommand)
@@ -357,21 +382,20 @@ fn process_input(input_buffer: &mut InputBuffer, table: &mut Table) -> Result<()
             Ok(())
         }
         PrepareResult::PrepareUnrecognizedStatement => {
-            println!("Unrecognized keyword at start of {:?}", &input_buffer.buffer.clone());
+            println!(
+                "Unrecognized keyword at start of {:?}",
+                &input_buffer.buffer.clone()
+            );
             Ok(())
         }
         PrepareResult::PrepareSyntaxError => {
             println!("Syntax error: could not parse statement");
             Err(PrepareError)
         }
-        PrepareResult::PrepareStringTooLong => {
-            Err(PrepareStringTooLong)
-        }
-        PrepareResult::PrepareNegativeId => {
-            Err(Error::PrepareNegativeId)
-        }
+        PrepareResult::PrepareStringTooLong => Err(PrepareStringTooLong),
+        PrepareResult::PrepareNegativeId => Err(Error::PrepareNegativeId),
     }?;
-    match execute_statement(&mut statement, table) {
+    match execute_statement(&mut statement, cursor) {
         ExecuteSuccess => {
             // println!("Query executed successfully");
             Ok(())
@@ -435,55 +459,52 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
                         statement.row_to_insert.username = name;
                         PrepareResult::PrepareSuccess
                     }
-                    Err(_) => {
-                        PrepareResult::PrepareSyntaxError
-                    }
+                    Err(_) => PrepareResult::PrepareSyntaxError,
                 }
             }
             "select" => {
                 statement.statement_type = Some(StatementType::StatementSelect);
                 PrepareResult::PrepareSuccess
             }
-            _ => PrepareResult::PrepareUnrecognizedStatement
+            _ => PrepareResult::PrepareUnrecognizedStatement,
         };
     }
     PrepareResult::PrepareUnrecognizedStatement
 }
 
-fn execute_statement(statement: &Statement, table: &mut Table) -> ExecuteResult {
+fn execute_statement(statement: &Statement, cursor: &mut Cursor) -> ExecuteResult {
     return match &statement.statement_type {
         None => {
             println!("The statement is not valid for execution");
             ExecuteResult::ExecuteFail
         }
-        Some(stmt) => {
-            match stmt {
-                StatementType::StatementInsert => {
-                    execute_insert(statement, table)
-                }
-                StatementType::StatementSelect => {
-                    execute_select(statement, table)
-                }
-            }
-        }
+        Some(stmt) => match stmt {
+            StatementType::StatementInsert => execute_insert(statement, cursor),
+            StatementType::StatementSelect => execute_select(statement, cursor),
+        },
     };
 }
 
-fn execute_insert(statement: &Statement, table: &mut Table) -> ExecuteResult {
-    if table.num_rows >= TABLE_MAX_ROWS {
+fn execute_insert(statement: &Statement, cursor: &mut Cursor) -> ExecuteResult {
+    cursor.table_end();
+    if cursor.table.num_rows >= TABLE_MAX_ROWS {
         return ExecuteTableFull;
     }
-    serialize_row(&statement.row_to_insert, table.row_slot(table.num_rows).unwrap());
-    table.num_rows += 1;
-
+    serialize_row(&statement.row_to_insert, cursor.cursor_value().unwrap());
+    cursor.table.num_rows += 1;
+    cursor.cursor_advance();
     ExecuteSuccess
 }
 
-fn execute_select(_: &Statement, table: &mut Table) -> ExecuteResult {
+fn execute_select(_: &Statement, cursor: &mut Cursor) -> ExecuteResult {
     let mut row = Row::new();
-    for i in 0..table.num_rows {
-        deserialize_row(table.row_slot(i).unwrap(), &mut row);
-        println!("Row {} {:?}", i, row);
+    let mut i = 0;
+    cursor.table_start();
+    while !cursor.end_of_table {
+        deserialize_row(cursor.cursor_value().unwrap(), &mut row);
+        cursor.cursor_advance();
+        println!("Row {} {:?}",i, row);
+        i += 1;
     }
     ExecuteSuccess
 }
@@ -509,7 +530,11 @@ fn serialize_row(source: &Row, destination: &mut [u8]) {
             email_length,
         );
         if email_length < EMAIL_SIZE {
-            ptr::write_bytes(destination.as_mut_ptr().add(EMAIL_OFFSET + email_length), 0, EMAIL_SIZE - email_length);
+            ptr::write_bytes(
+                destination.as_mut_ptr().add(EMAIL_OFFSET + email_length),
+                0,
+                EMAIL_SIZE - email_length,
+            );
         }
     }
 }
@@ -523,39 +548,46 @@ fn deserialize_row(source: &[u8], destination: &mut Row) {
         );
 
         let username_bytes = &source[USERNAME_OFFSET..USERNAME_OFFSET + USERNAME_SIZE];
-        destination.username = String::from_utf8_lossy(username_bytes).trim_end_matches('\0').to_string();
+        destination.username = String::from_utf8_lossy(username_bytes)
+            .trim_end_matches('\0')
+            .to_string();
 
         let email_bytes = &source[EMAIL_OFFSET..EMAIL_OFFSET + EMAIL_SIZE];
-        destination.email = String::from_utf8_lossy(email_bytes).trim_end_matches('\0').to_string();
+        destination.email = String::from_utf8_lossy(email_bytes)
+            .trim_end_matches('\0')
+            .to_string();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, InputBuffer, process_input, Table};
+
+    use crate::{process_input, Cursor, Error, InputBuffer, Table};
 
     #[test]
     fn test_inserting_and_retrieving_a_row() {
-        let mut table = Table::new();
+        let table = Table::new();
+        let mut cursor = Cursor::new(table);
         let mut input_buffer = InputBuffer::new();
         let str = String::from("insert 1 bala bala@gmail.com");
         input_buffer.buffer_length = str.len() as i32;
         input_buffer.buffer = Some(str);
-        let _ = process_input(&mut input_buffer, &mut table);
-        assert_eq!(table.num_rows, 1);
+        let _ = process_input(&mut input_buffer, &mut cursor);
+        assert_eq!(cursor.table.num_rows, 1);
     }
 
     #[test]
     fn test_table_full() {
-        let mut table = Table::new();
+        let table = Table::new();
         let mut input_buffer = InputBuffer::new();
+        let mut cursor = Cursor::new(table);
         for i in 0..1400 {
             let str = format!("insert {} bala bala@gmail.com", i);
             input_buffer.buffer_length = str.len() as i32;
             input_buffer.buffer = Some(str);
-            let _ = process_input(&mut input_buffer, &mut table);
+            let _ = process_input(&mut input_buffer, &mut cursor);
         }
-        let res = process_input(&mut input_buffer, &mut table);
+        let res = process_input(&mut input_buffer, &mut cursor);
         assert!(matches!(res, Err(Error::TableFull)));
     }
 
@@ -563,12 +595,13 @@ mod tests {
     fn allows_inserting_strings_with_maximum_length() {
         let long_username = "a".repeat(33);
         let long_email = "a".repeat(255);
-        let mut table = Table::new();
+        let table = Table::new();
+        let mut cursor = Cursor::new(table);
         let mut input_buffer = InputBuffer::new();
         let str = format!("insert 1 {} {}", long_username, long_email);
         input_buffer.buffer_length = str.len() as i32;
         input_buffer.buffer = Some(str);
-        let res = process_input(&mut input_buffer, &mut table);
+        let res = process_input(&mut input_buffer, &mut cursor);
         assert!(matches!(res, Err(Error::PrepareStringTooLong)));
     }
 
@@ -576,12 +609,13 @@ mod tests {
     fn allows_inserting_negative_id() {
         let long_username = "a".to_string();
         let long_email = "b".to_string();
-        let mut table = Table::new();
+        let table = Table::new();
+        let mut cursor = Cursor::new(table);
         let mut input_buffer = InputBuffer::new();
         let str = format!("insert -10 {} {}", long_username, long_email);
         input_buffer.buffer_length = str.len() as i32;
         input_buffer.buffer = Some(str);
-        let res = process_input(&mut input_buffer, &mut table);
+        let res = process_input(&mut input_buffer, &mut cursor);
         assert!(matches!(res, Err(Error::PrepareNegativeId)));
     }
 }
