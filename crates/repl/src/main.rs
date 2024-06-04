@@ -1,4 +1,4 @@
-use std::borrow::{BorrowMut, ToOwned};
+use std::borrow::ToOwned;
 use std::clone::Clone;
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -39,6 +39,7 @@ enum MetaCommandResult {
 enum StatementType {
     StatementInsert,
     StatementSelect,
+    StatementSelectWithEmail,
 }
 
 enum PrepareResult {
@@ -258,11 +259,13 @@ impl Table {
         }
     }
 }
+
 struct Cursor {
     table: Table,
     row_num: usize,
     end_of_table: bool,
 }
+
 impl Cursor {
     fn new(table: Table) -> Self {
         Cursor {
@@ -303,6 +306,7 @@ impl Cursor {
         }
     }
 }
+
 fn dp_open(filename: &str) -> Result<Table, Error> {
     Table::open_from_file(filename)
 }
@@ -463,7 +467,18 @@ fn prepare_statement(input_buffer: &InputBuffer, statement: &mut Statement) -> P
                 }
             }
             "select" => {
-                statement.statement_type = Some(StatementType::StatementSelect);
+                if buffer_data.len() > 6 {
+                    match scan_fmt!(buffer_data, "select {} ", String) {
+                        Ok(email) => {
+                            statement.row_to_insert.email = email;
+                            statement.statement_type =
+                                Some(StatementType::StatementSelectWithEmail);
+                        }
+                        Err(_) => {}
+                    }
+                } else {
+                    statement.statement_type = Some(StatementType::StatementSelect);
+                }
                 PrepareResult::PrepareSuccess
             }
             _ => PrepareResult::PrepareUnrecognizedStatement,
@@ -481,6 +496,9 @@ fn execute_statement(statement: &Statement, cursor: &mut Cursor) -> ExecuteResul
         Some(stmt) => match stmt {
             StatementType::StatementInsert => execute_insert(statement, cursor),
             StatementType::StatementSelect => execute_select(statement, cursor),
+            StatementType::StatementSelectWithEmail => {
+                execute_select_with_email(&statement.row_to_insert.email, cursor)
+            }
         },
     };
 }
@@ -495,7 +513,24 @@ fn execute_insert(statement: &Statement, cursor: &mut Cursor) -> ExecuteResult {
     cursor.cursor_advance();
     ExecuteSuccess
 }
-
+fn execute_select_with_email(email: &String, cursor: &mut Cursor) -> ExecuteResult {
+    let mut row = Row::new();
+    let mut i = 0;
+    let start = Instant::now();
+    cursor.table_start();
+    while !cursor.end_of_table {
+        deserialize_row(cursor.cursor_value().unwrap(), &mut row);
+        if row.email.eq(email) {
+            println!("Found the row {:?} \n at index {}", row, i);
+            break;
+        }
+        cursor.cursor_advance();
+        i += 1;
+    }
+    let elapsed = start.elapsed();
+    println!("It took {:?} to complete the select with email", elapsed);
+    ExecuteSuccess
+}
 fn execute_select(_: &Statement, cursor: &mut Cursor) -> ExecuteResult {
     let mut row = Row::new();
     let mut i = 0;
@@ -503,7 +538,7 @@ fn execute_select(_: &Statement, cursor: &mut Cursor) -> ExecuteResult {
     while !cursor.end_of_table {
         deserialize_row(cursor.cursor_value().unwrap(), &mut row);
         cursor.cursor_advance();
-        println!("Row {} {:?}",i, row);
+        println!("Row {} {:?}", i, row);
         i += 1;
     }
     ExecuteSuccess
@@ -561,7 +596,6 @@ fn deserialize_row(source: &[u8], destination: &mut Row) {
 
 #[cfg(test)]
 mod tests {
-
     use crate::{process_input, Cursor, Error, InputBuffer, Table};
 
     #[test]
@@ -617,5 +651,21 @@ mod tests {
         input_buffer.buffer = Some(str);
         let res = process_input(&mut input_buffer, &mut cursor);
         assert!(matches!(res, Err(Error::PrepareNegativeId)));
+    }
+    #[test]
+    fn testing_the_time_to_get_the_email() {
+        let table = Table::new();
+        let mut input_buffer = InputBuffer::new();
+        let mut cursor = Cursor::new(table);
+        for i in 0..1399 {
+            let str = format!("insert {} bala {}@gmail.com", i, i as f64 * 1e9 + 7f64);
+            input_buffer.buffer_length = str.len() as i32;
+            input_buffer.buffer = Some(str);
+            let _ = process_input(&mut input_buffer, &mut cursor);
+        }
+        let str = format!("select {}@gmail.com", 1388f64 * 1e9 + 7f64);
+        input_buffer.buffer_length = str.len() as i32;
+        input_buffer.buffer = Some(str);
+        let _ = process_input(&mut input_buffer, &mut cursor);
     }
 }
