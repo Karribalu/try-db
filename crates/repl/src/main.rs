@@ -29,6 +29,31 @@ const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 // const NUM_ROWS_FILLED_FOR_PAGE_OFFSET: usize = 0;
 // const NUM_ROWS_FILLED_FOR_PAGE_SIZE: usize =  size_of::<i32>();
 
+// Common Node Header Layout
+const NODE_TYPE_SIZE: usize = size_of::<i8>();
+const NODE_TYPE_OFFSET: usize = 0;
+const IS_ROOT_SIZE: usize = size_of::<i8>();
+const IS_ROOT_OFFSET: usize = NODE_TYPE_SIZE;
+const PARENT_POINTER_SIZE: usize = size_of::<i32>();
+const PARENT_POINTER_OFFSET: usize = IS_ROOT_OFFSET + IS_ROOT_SIZE;
+const COMMON_NODE_HEADER_SIZE: usize = NODE_TYPE_SIZE + IS_ROOT_OFFSET + PARENT_POINTER_SIZE;
+
+// Leaf Node Header Layout
+const LEAF_NODE_NUM_CELLS_SIZE: usize = size_of::<i32>();
+const LEAF_NODE_NUM_CELLS_OFFSET: usize = COMMON_NODE_HEADER_SIZE;
+const LEAF_NODE_HEADER_SIZE: usize = COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+
+/*
+    Leaf Node Body Layout
+*/
+const LEAF_NODE_KEY_SIZE: usize = size_of::<i32>();
+const LEAF_NODE_KEY_OFFSET: usize = 0;
+const LEAF_NODE_VALUE_SIZE: usize = ROW_SIZE;
+const LEAF_NODE_VALUE_OFFSET: usize = LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
+const LEAF_NODE_CELL_SIZE: usize = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
+const LEAF_NODE_SPACE_FOR_CELLS: usize = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
+const LEAF_NODE_MAX_CELLS: usize = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
+
 enum MetaCommandResult {
     MetaCommandSuccess,
     MetaCommandUnrecognizedCommand,
@@ -68,6 +93,10 @@ enum Error {
     PrepareNegativeId,
     TableFull,
     DbOpenError,
+}
+enum NodeType {
+    NodInternal,
+    NodeLeaf,
 }
 
 #[derive(Debug)]
@@ -331,6 +360,8 @@ fn db_close(table: &mut Table) {
     }
 }
 
+fn leaf_node_num_cells(node: &N)
+
 fn main() {
     let mut db_name = String::new();
     io::stdin().read_line(&mut db_name).unwrap();
@@ -504,7 +535,6 @@ fn execute_statement(statement: &Statement, cursor: &mut Cursor) -> ExecuteResul
 }
 
 fn execute_insert(statement: &Statement, cursor: &mut Cursor) -> ExecuteResult {
-    cursor.table_end();
     if cursor.table.num_rows >= TABLE_MAX_ROWS {
         return ExecuteTableFull;
     }
